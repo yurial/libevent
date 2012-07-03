@@ -69,7 +69,7 @@ extern int evthread_lock_debugging_enabled_;
  * thread. Requires lock. */
 #define EVBASE_NEED_NOTIFY(base)			 \
 	(evthread_id_fn_ != NULL &&			 \
-	    (base)->running_loop &&			 \
+	    (base)->th_owner_id != 0 &&			 \
 	    (base)->th_owner_id != evthread_id_fn_())
 
 /** Allocate a new lock, and store it in lockvar, a void*.  Sets lockvar to
@@ -197,8 +197,8 @@ int evthreadimpl_locking_enabled_(void);
 #define EVBASE_IN_THREAD(base)				\
 	((base)->th_owner_id == evthreadimpl_get_id_())
 #define EVBASE_NEED_NOTIFY(base)			 \
-	((base)->running_loop &&			 \
-	    ((base)->th_owner_id != evthreadimpl_get_id_()))
+	((base)->th_owner_id != 0 &&			 \
+    (base)->th_owner_id != evthreadimpl_get_id_())
 
 #define EVTHREAD_ALLOC_LOCK(lockvar, locktype)		\
 	((lockvar) = evthreadimpl_lock_alloc_(locktype))

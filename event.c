@@ -653,6 +653,7 @@ event_base_new_with_config(const struct event_config *cfg)
 	    (!cfg || !(cfg->flags & EVENT_BASE_FLAG_NOLOCK))) {
 		int r;
 		EVTHREAD_ALLOC_LOCK(base->th_base_lock, 0);
+        EVTHREAD_ALLOC_LOCK(base->th_dispatch_lock, 0);
 		EVTHREAD_ALLOC_COND(base->current_event_cond);
 		r = evthread_make_base_notifiable(base);
 		if (r<0) {
@@ -816,6 +817,7 @@ event_base_free(struct event_base *base)
 	evmap_signal_clear_(&base->sigmap);
 	event_changelist_freemem_(&base->changelist);
 
+    EVTHREAD_FREE_LOCK(base->th_dispatch_lock, 0);
 	EVTHREAD_FREE_LOCK(base->th_base_lock, 0);
 	EVTHREAD_FREE_COND(base->current_event_cond);
 
@@ -1443,12 +1445,14 @@ event_process_active_single_queue(struct event_base *base,
 		if (!(evcb->evcb_flags & EVLIST_INTERNAL))
 			++count;
 
-
 		base->current_event = evcb;
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
 		base->current_event_waiters = 0;
+        unsigned long current_owner_id = base->th_owner_id;
+        base->th_owner_id = 0;
 #endif
 
+        EVBASE_RELEASE_LOCK(base, th_dispatch_lock);
 		switch (evcb->evcb_closure) {
 		case EV_CLOSURE_EVENT_SIGNAL:
 			event_signal_closure(base, ev);
@@ -1468,10 +1472,12 @@ event_process_active_single_queue(struct event_base *base,
 		default:
 			EVUTIL_ASSERT(0);
 		}
+        EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
 
 		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 		base->current_event = NULL;
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
+        base->th_owner_id = current_owner_id;
 		if (base->current_event_waiters) {
 			base->current_event_waiters = 0;
 			EVTHREAD_COND_BROADCAST(base->current_event_cond);
@@ -1671,34 +1677,32 @@ event_base_loop(struct event_base *base, int flags)
 	struct timeval tv;
 	struct timeval *tv_p;
 	int res, done, retval = 0;
-
-	/* Grab the lock.  We will release it inside evsel.dispatch, and again
-	 * as we invoke user callbacks. */
-	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-
-	if (base->running_loop) {
-		event_warnx("%s: reentrant invocation.  Only one event_base_loop"
-		    " can run on each event_base at once.", __func__);
-		EVBASE_RELEASE_LOCK(base, th_base_lock);
-		return -1;
-	}
-
-	base->running_loop = 1;
-
-	clear_time_cache(base);
-
-	if (base->sig.ev_signal_added && base->sig.ev_n_signals_added)
-		evsig_set_base_(base);
-
-	done = 0;
-
-#ifndef EVENT__DISABLE_THREAD_SUPPORT
-	base->th_owner_id = EVTHREAD_GET_ID();
+#ifdef EVENT__DISABLE_THREAD_SUPPORT
+    base->running_loop = 0;
 #endif
+    /* Grab the lock.  We will release it inside user callbacks. */
+    EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
+    /* Grab the lock.  We will release it inside evsel.dispatch, and again
+     * as we invoke user callbacks. */
+    EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 
-	base->event_gotterm = base->event_break = 0;
-
+    clear_time_cache(base);
+    done = 0;
 	while (!done) {
+
+        if (base->sig.ev_signal_added && base->sig.ev_n_signals_added
+                #ifndef EVENT__DISABLE_THREAD_SUPPORT
+                && base->th_owner_id != EVTHREAD_GET_ID()
+                #endif
+                )
+            evsig_set_base_(base);
+
+    #ifndef EVENT__DISABLE_THREAD_SUPPORT
+        base->th_owner_id = EVTHREAD_GET_ID();
+    #endif
+
+        base->event_gotterm = base->event_break = 0;
+
 		base->event_continue = 0;
 		base->n_deferreds_queued = 0;
 
@@ -1760,8 +1764,10 @@ event_base_loop(struct event_base *base, int flags)
 
 done:
 	clear_time_cache(base);
-	base->running_loop = 0;
-
+#ifdef EVENT__DISABLE_THREAD_SUPPORT
+    base->running_loop = 0;
+#endif
+    EVBASE_RELEASE_LOCK(base, th_dispatch_lock);
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 
 	return (retval);

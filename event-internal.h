@@ -214,9 +214,11 @@ struct event_base {
 	/** The currently running priority of events */
 	int event_running_priority;
 
+#ifdef EVENT__DISABLE_THREAD_SUPPORT
 	/** Set if we're running the event_base_loop function, to prevent
 	 * reentrant invocation. */
 	int running_loop;
+#endif
 
 	/** Set to the number of deferred_cbs we've made 'active' in the
 	 * loop.  This is a hack to prevent starvation; it would be smarter
@@ -271,6 +273,8 @@ struct event_base {
 	/* threading support */
 	/** The thread currently running the event_loop for this base */
 	unsigned long th_owner_id;
+    /** A lock to prevent conflicting accesses to dispatch event_base */
+    void *th_dispatch_lock;
 	/** A lock to prevent conflicting accesses to this event_base */
 	void *th_base_lock;
 	/** A condition that gets signalled when we're done processing an
