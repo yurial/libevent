@@ -654,7 +654,6 @@ event_base_new_with_config(const struct event_config *cfg)
 		int r;
 		EVTHREAD_ALLOC_LOCK(base->th_base_lock, 0);
         EVTHREAD_ALLOC_LOCK(base->th_dispatch_lock, 0);
-		EVTHREAD_ALLOC_COND(base->current_event_cond);
 		r = evthread_make_base_notifiable(base);
 		if (r<0) {
 			event_warnx("%s: Unable to make base notifiable.", __func__);
@@ -819,7 +818,6 @@ event_base_free(struct event_base *base)
 
     EVTHREAD_FREE_LOCK(base->th_dispatch_lock, 0);
 	EVTHREAD_FREE_LOCK(base->th_base_lock, 0);
-	EVTHREAD_FREE_COND(base->current_event_cond);
 
 	mm_free(base);
 }
@@ -1447,8 +1445,6 @@ event_process_active_single_queue(struct event_base *base,
 
 		base->current_event = evcb;
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
-		base->current_event_waiters = 0;
-        unsigned long current_owner_id = base->th_owner_id;
         base->th_owner_id = 0;
 #endif
 
@@ -1475,14 +1471,10 @@ event_process_active_single_queue(struct event_base *base,
         EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
 
 		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-		base->current_event = NULL;
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
-        base->th_owner_id = current_owner_id;
-		if (base->current_event_waiters) {
-			base->current_event_waiters = 0;
-			EVTHREAD_COND_BROADCAST(base->current_event_cond);
-		}
+        base->th_owner_id = EVTHREAD_GET_ID();
 #endif
+		base->current_event = NULL;
 
 		if (base->event_break)
 			return -1;
@@ -1679,9 +1671,10 @@ event_base_loop(struct event_base *base, int flags)
 	int res, done, retval = 0;
 #ifdef EVENT__DISABLE_THREAD_SUPPORT
     base->running_loop = 0;
-#endif
+#else
     /* Grab the lock.  We will release it inside user callbacks. */
     EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
+#endif
     /* Grab the lock.  We will release it inside evsel.dispatch, and again
      * as we invoke user callbacks. */
     EVBASE_ACQUIRE_LOCK(base, th_base_lock);
@@ -1766,8 +1759,9 @@ done:
 	clear_time_cache(base);
 #ifdef EVENT__DISABLE_THREAD_SUPPORT
     base->running_loop = 0;
-#endif
+#else
     EVBASE_RELEASE_LOCK(base, th_dispatch_lock);
+#endif
 	EVBASE_RELEASE_LOCK(base, th_base_lock);
 
 	return (retval);
@@ -1873,6 +1867,7 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 	ev->ev_flags = EVLIST_INIT;
 	ev->ev_ncalls = 0;
 	ev->ev_pncalls = NULL;
+    ev->ev_enabled = 1;
 
 	if (events & EV_SIGNAL) {
 		if ((events & (EV_READ|EV_WRITE)) != 0) {
@@ -2212,19 +2207,6 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 			return (-1);  /* ENOMEM == errno */
 	}
 
-	/* If the main thread is currently executing a signal event's
-	 * callback, and we are not the main thread, then we want to wait
-	 * until the callback is done before we mess with the event, or else
-	 * we can race on ev_ncalls and ev_pncalls below. */
-#ifndef EVENT__DISABLE_THREAD_SUPPORT
-	if (base->current_event == event_to_event_callback(ev) &&
-	    (ev->ev_events & EV_SIGNAL)
-	    && !EVBASE_IN_THREAD(base)) {
-		++base->current_event_waiters;
-		EVTHREAD_COND_WAIT(base->current_event_cond, base->th_base_lock);
-	}
-#endif
-
 	if ((ev->ev_events & (EV_READ|EV_WRITE|EV_SIGNAL)) &&
 	    !(ev->ev_flags & (EVLIST_INSERTED|EVLIST_ACTIVE|EVLIST_ACTIVE_LATER))) {
 		if (ev->ev_events & (EV_READ|EV_WRITE))
@@ -2374,21 +2356,6 @@ event_del_nolock_(struct event *ev)
 		return (-1);
 
 	EVENT_BASE_ASSERT_LOCKED(ev->ev_base);
-
-	/* If the main thread is currently executing this event's callback,
-	 * and we are not the main thread, then we want to wait until the
-	 * callback is done before we start removing the event.  That way,
-	 * when this function returns, it will be safe to free the
-	 * user-supplied argument. */
-	base = ev->ev_base;
-#ifndef EVENT__DISABLE_THREAD_SUPPORT
-	if (base->current_event == event_to_event_callback(ev) &&
-	    !EVBASE_IN_THREAD(base)) {
-		++base->current_event_waiters;
-		EVTHREAD_COND_WAIT(base->current_event_cond, base->th_base_lock);
-	}
-#endif
-
 	EVUTIL_ASSERT(!(ev->ev_flags & ~EVLIST_ALL));
 
 	/* See if we are just active executing this event in a loop */
@@ -2487,13 +2454,6 @@ event_active_nolock_(struct event *ev, int res, short ncalls)
 		base->event_continue = 1;
 
 	if (ev->ev_events & EV_SIGNAL) {
-#ifndef EVENT__DISABLE_THREAD_SUPPORT
-		if (base->current_event == event_to_event_callback(ev) &&
-		    !EVBASE_IN_THREAD(base)) {
-			++base->current_event_waiters;
-			EVTHREAD_COND_WAIT(base->current_event_cond, base->th_base_lock);
-		}
-#endif
 		ev->ev_ncalls = ncalls;
 		ev->ev_pncalls = NULL;
 	}
