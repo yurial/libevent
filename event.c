@@ -1424,11 +1424,11 @@ event_process_active_single_queue(struct event_base *base,
         if (evcb->evcb_flags & EVLIST_CALLED )
             continue;
         evcb->evcb_flags |= EVLIST_CALLED;
+        event_queue_remove_active(base, evcb);
 
 		if (evcb->evcb_flags & EVLIST_INIT)
             {
 			ev = event_callback_to_event(evcb);
-            ev->ev_flags |= EVLIST_CALLED;
             event_debug((
                 "event_process_active: event: %p, %s%scall %p",
                 ev,
@@ -1463,7 +1463,6 @@ event_process_active_single_queue(struct event_base *base,
 		default:
 			EVUTIL_ASSERT(0);
 		}
-        EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
 		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
         base->th_owner_id = EVTHREAD_GET_ID();
@@ -1478,14 +1477,15 @@ event_process_active_single_queue(struct event_base *base,
                 event_del_nolock_(ev);
             else {
                 evmap_io_deactive_(base, ev->ev_fd, ev->ev_events);
-                event_queue_remove_active(base, evcb);
             }
 		} else {
-			event_queue_remove_active(base, evcb);
 			event_debug(("event_process_active: event_callback %p, "
 				"closure %d, call %p",
 				evcb, evcb->evcb_closure, evcb->evcb_cb_union.evcb_callback));
         }
+        EVBASE_RELEASE_LOCK(base, th_base_lock);
+        EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
+		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 		if (base->event_break)
 			return -1;
 		if (count >= max_to_process)
@@ -2871,6 +2871,7 @@ event_queue_insert_inserted(struct event_base *base, struct event *ev)
 static void
 event_queue_insert_active(struct event_base *base, struct event_callback *evcb)
 {
+printf( stderr, "insert: [%08x] %p\n", pthread_self(), evcb );
 	EVENT_BASE_ASSERT_LOCKED(base);
 
 	if (evcb->evcb_flags & EVLIST_ACTIVE) {
