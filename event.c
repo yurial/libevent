@@ -1413,37 +1413,32 @@ event_process_active_single_queue(struct event_base *base,
     struct evcallback_list *activeq,
     int max_to_process, const struct timeval *endtime)
 {
-	struct event_callback *evcb;
+	struct event_callback *evcb, *next;
 	int count = 0;
 
 	EVUTIL_ASSERT(activeq != NULL);
 
-	for (evcb = TAILQ_FIRST(activeq); evcb; evcb = TAILQ_FIRST(activeq)) {
+	for (evcb = TAILQ_FIRST(activeq); evcb; evcb = next) {
 		struct event *ev=NULL;
-		if (evcb->evcb_flags & EVLIST_INIT) {
+        next = evcb->evcb_active_next.tqe_next;
+        if (evcb->evcb_flags & EVLIST_CALLED )
+            continue;
+        evcb->evcb_flags |= EVLIST_CALLED;
+
+		if (evcb->evcb_flags & EVLIST_INIT)
+            {
 			ev = event_callback_to_event(evcb);
-
-			if (ev->ev_events & EV_PERSIST)
-				event_queue_remove_active(base, evcb);
-			else
-				event_del_nolock_(ev);
-			event_debug((
-			    "event_process_active: event: %p, %s%scall %p",
-			    ev,
-			    ev->ev_res & EV_READ ? "EV_READ " : " ",
-			    ev->ev_res & EV_WRITE ? "EV_WRITE " : " ",
-			    ev->ev_callback));
-		} else {
-			event_queue_remove_active(base, evcb);
-			event_debug(("event_process_active: event_callback %p, "
-				"closure %d, call %p",
-				evcb, evcb->evcb_closure, evcb->evcb_cb_union.evcb_callback));
-		}
-
+            ev->ev_flags |= EVLIST_CALLED;
+            event_debug((
+                "event_process_active: event: %p, %s%scall %p",
+                ev,
+                ev->ev_res & EV_READ ? "EV_READ " : " ",
+                ev->ev_res & EV_WRITE ? "EV_WRITE " : " ",
+                ev->ev_callback));
+            }
 		if (!(evcb->evcb_flags & EVLIST_INTERNAL))
 			++count;
 
-		base->current_event = evcb;
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
         base->th_owner_id = 0;
 #endif
@@ -1469,13 +1464,28 @@ event_process_active_single_queue(struct event_base *base,
 			EVUTIL_ASSERT(0);
 		}
         EVBASE_ACQUIRE_LOCK(base, th_dispatch_lock);
-
 		EVBASE_ACQUIRE_LOCK(base, th_base_lock);
 #ifndef EVENT__DISABLE_THREAD_SUPPORT
         base->th_owner_id = EVTHREAD_GET_ID();
 #endif
-		base->current_event = NULL;
 
+        evcb->evcb_flags &= ~EVLIST_CALLED;
+        if ( NULL != ev ) {
+            ev->ev_flags &= ~EVLIST_CALLED;
+            if ( ev->ev_flags & EVLIST_FREE )
+                event_free( ev );
+            else if ( ev->ev_flags & EVLIST_DEL || !(ev->ev_events & EV_PERSIST) )
+                event_del_nolock_(ev);
+            else {
+                evmap_io_deactive_(base, ev->ev_fd, ev->ev_events);
+                event_queue_remove_active(base, evcb);
+            }
+		} else {
+			event_queue_remove_active(base, evcb);
+			event_debug(("event_process_active: event_callback %p, "
+				"closure %d, call %p",
+				evcb, evcb->evcb_closure, evcb->evcb_cb_union.evcb_callback));
+        }
 		if (base->event_break)
 			return -1;
 		if (count >= max_to_process)
@@ -1867,7 +1877,6 @@ event_assign(struct event *ev, struct event_base *base, evutil_socket_t fd, shor
 	ev->ev_flags = EVLIST_INIT;
 	ev->ev_ncalls = 0;
 	ev->ev_pncalls = NULL;
-    ev->ev_enabled = 1;
 
 	if (events & EV_SIGNAL) {
 		if ((events & (EV_READ|EV_WRITE)) != 0) {
@@ -1928,20 +1937,6 @@ event_self_cbarg(void)
 }
 
 struct event *
-event_base_get_running_event(struct event_base *base)
-{
-	struct event *ev = NULL;
-	EVBASE_ACQUIRE_LOCK(base, th_base_lock);
-	if (EVBASE_IN_THREAD(base)) {
-		struct event_callback *evcb = base->current_event;
-		if (evcb->evcb_flags & EVLIST_INIT)
-			ev = event_callback_to_event(evcb);
-	}
-	EVBASE_RELEASE_LOCK(base, th_base_lock);
-	return ev;
-}
-
-struct event *
 event_new(struct event_base *base, evutil_socket_t fd, short events, void (*cb)(evutil_socket_t, short, void *), void *arg)
 {
 	struct event *ev;
@@ -1962,10 +1957,18 @@ event_free(struct event *ev)
 	event_debug_assert_is_setup_(ev);
 
 	/* make sure that this event won't be coming back to haunt us. */
-	event_del(ev);
+
+	EVBASE_ACQUIRE_LOCK(ev->ev_base, th_base_lock);
+
+	if ( ev->ev_flags & EVLIST_CALLED ) {
+        ev->ev_flags |= EVLIST_FREE;
+    } else {
+    event_del_nolock_(ev);
 	event_debug_note_teardown_(ev);
 	mm_free(ev);
+    }
 
+	EVBASE_RELEASE_LOCK(ev->ev_base, th_base_lock);
 }
 
 void
@@ -2185,6 +2188,11 @@ event_add_nolock_(struct event *ev, const struct timeval *tv,
 
 	EVENT_BASE_ASSERT_LOCKED(base);
 	event_debug_assert_is_setup_(ev);
+    if ( ev->ev_flags & EVLIST_DEL )
+        {
+        ev->ev_flags &= ~EVLIST_DEL;
+        return 0;
+        }
 
 	event_debug((
 		 "event_add: event: %p (fd %d), %s%s%scall %p",
@@ -2356,6 +2364,7 @@ event_del_nolock_(struct event *ev)
 		return (-1);
 
 	EVENT_BASE_ASSERT_LOCKED(ev->ev_base);
+    base = ev->ev_base;
 	EVUTIL_ASSERT(!(ev->ev_flags & ~EVLIST_ALL));
 
 	/* See if we are just active executing this event in a loop */
@@ -2365,6 +2374,11 @@ event_del_nolock_(struct event *ev)
 			*ev->ev_pncalls = 0;
 		}
 	}
+
+    if ( ev->ev_flags & EVLIST_CALLED ) {
+        ev->ev_flags |= EVLIST_DEL;
+        return 0;
+    }
 
 	if (ev->ev_flags & EVLIST_TIMEOUT) {
 		/* NOTE: We never need to notify the main thread because of a
@@ -2378,8 +2392,8 @@ event_del_nolock_(struct event *ev)
 	}
 
 	if (ev->ev_flags & EVLIST_ACTIVE)
-		event_queue_remove_active(base, event_to_event_callback(ev));
-	else if (ev->ev_flags & EVLIST_ACTIVE_LATER)
+		    event_queue_remove_active(base, event_to_event_callback(ev));
+    else if (ev->ev_flags & EVLIST_ACTIVE_LATER)
 		event_queue_remove_active_later(base, event_to_event_callback(ev));
 
 	if (ev->ev_flags & EVLIST_INSERTED) {

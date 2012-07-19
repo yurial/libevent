@@ -278,8 +278,6 @@ struct event_base {
 	/** A lock to prevent conflicting accesses to this event_base */
 	void *th_base_lock;
 #endif
-	/** The event whose callback is executing right now */
-	struct event_callback *current_event;
 
 #ifdef _WIN32
 	/** IOCP support structure, if IOCP is enabled. */

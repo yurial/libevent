@@ -77,6 +77,8 @@ int evmap_io_del_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 */
 void evmap_io_active_(struct event_base *base, evutil_socket_t fd, short events);
 
+/** Add events back */
+void evmap_io_deactive_(struct event_base *base, evutil_socket_t fd, short events);
 
 /* These functions behave in the same way as evmap_io_*, except they work on
  * signals rather than fds.  signals use a linear map everywhere; fds use

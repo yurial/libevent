@@ -222,7 +222,7 @@ check_bucket_levels_cb(evutil_socket_t fd, short events, void *arg)
 
 	total_n_bev_checks++;
 	if (total_n_bev_checks >= .8 * (cfg_duration / cfg_tick_msec) * cfg_n_connections) {
-		event_free(event_base_get_running_event(bufferevent_get_base(bev)));
+		bufferevent_free( bev );
 	}
 }
 

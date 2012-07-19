@@ -390,6 +390,7 @@ evmap_io_del_(struct event_base *base, evutil_socket_t fd, struct event *ev)
 void
 evmap_io_active_(struct event_base *base, evutil_socket_t fd, short events)
 {
+    const struct eventop *evsel = base->evsel;
 	struct event_io_map *io = &base->io;
 	struct evmap_io *ctx;
 	struct event *ev;
@@ -400,10 +401,36 @@ evmap_io_active_(struct event_base *base, evutil_socket_t fd, short events)
 	GET_IO_SLOT(ctx, io, fd, evmap_io);
 
 	EVUTIL_ASSERT(ctx);
+    void *extra = ((char*)ctx) + sizeof(struct evmap_io);
 	LIST_FOREACH(ev, &ctx->events, ev_io_next) {
-		if (ev->ev_events & events)
+		if (ev->ev_events & events) {
 			event_active_nolock_(ev, ev->ev_events & events, 1);
+            evsel->del( base, ev->ev_fd, ev->ev_events, EV_READ | EV_WRITE, extra );
+            }
 	}
+}
+
+void
+evmap_io_deactive_(struct event_base *base, evutil_socket_t fd, short events)
+{
+    const struct eventop *evsel = base->evsel;
+	struct event_io_map *io = &base->io;
+	struct evmap_io *ctx;
+	struct event *ev;
+
+#ifndef EVMAP_USE_HT
+	EVUTIL_ASSERT(fd < io->nentries);
+#endif
+	GET_IO_SLOT(ctx, io, fd, evmap_io);
+
+	EVUTIL_ASSERT(ctx);
+    void *extra = ((char*)ctx) + sizeof(struct evmap_io);
+	LIST_FOREACH(ev, &ctx->events, ev_io_next) {
+		if (ev->ev_events & events) {
+            evsel->add( base, ev->ev_fd, 0, ev->ev_events, extra );
+            }
+	}
+    //base->th_notify_fn(base);
 }
 
 /* code specific to signals */
